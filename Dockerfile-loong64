@@ -1,5 +1,5 @@
 FROM ghcr.io/loong64/python:3.11-slim-trixie AS stage-build
-
+ARG TARGETARCH
 ARG DEPENDENCIES="                    \
         ca-certificates               \
         wget                          \
