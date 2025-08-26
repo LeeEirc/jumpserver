@@ -100,10 +100,9 @@ ARG TOOLS="                           \
         curl                          \
         iputils-ping                  \
         netcat-openbsd                \
-        nmap                          \
         telnet                        \
         vim                           \
-        postgresql-client-13          \
+        postgresql-client             \
         wget                          \
         poppler-utils"
 
