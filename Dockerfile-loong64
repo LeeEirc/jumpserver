@@ -1,0 +1,126 @@
+FROM ghcr.io/loong64/python:3.11-slim-trixie AS stage-build
+
+ARG DEPENDENCIES="                    \
+        ca-certificates               \
+        wget                          \
+        g++                           \
+        make                          \
+        pkg-config                    \
+        default-libmysqlclient-dev    \
+        freetds-dev                   \
+        gettext                       \
+        libkrb5-dev                   \
+        libldap2-dev                  \
+        libsasl2-dev"
+
+RUN set -ex \
+    && rm -f /etc/apt/apt.conf.d/docker-clean \
+    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache \
+    && apt-get update > /dev/null \
+    && apt-get -y install --no-install-recommends ${DEPENDENCIES} \
+    && echo "no" | dpkg-reconfigure dash
+
+RUN wget https://github.com/loong64/uv/releases/download/0.8.13/uv-loongarch64-unknown-linux-gnu.tar.gz \
+    && tar -xf uv-loongarch64-unknown-linux-gnu.tar.gz \
+    && mv uv-loongarch64-unknown-linux-gnu/* /usr/local/bin/ \
+    && rm -rf uv-loongarch64-unknown-linux-gnu.tar.gz uv-loongarch64-unknown-linux-gnu
+
+
+# Install bin tools
+ARG CHECK_VERSION=v1.0.4
+RUN set -ex \
+    && wget https://github.com/jumpserver-dev/healthcheck/releases/download/${CHECK_VERSION}/check-${CHECK_VERSION}-linux-${TARGETARCH}.tar.gz \
+    && tar -xf check-${CHECK_VERSION}-linux-${TARGETARCH}.tar.gz \
+    && mv check /usr/local/bin/ \
+    && chown root:root /usr/local/bin/check \
+    && chmod 755 /usr/local/bin/check \
+    && rm -f check-${CHECK_VERSION}-linux-${TARGETARCH}.tar.gz
+
+# Install Python dependencies
+WORKDIR /opt/jumpserver
+ARG PIP_MIRROR=https://pypi.org/simple
+ENV POETRY_PYPI_MIRROR_URL=${PIP_MIRROR}
+ENV ANSIBLE_COLLECTIONS_PATHS=/opt/py3/lib/python3.11/site-packages/ansible_collections
+ENV LANG=en_US.UTF-8 \
+    PATH=/opt/py3/bin:$PATH
+ENV PIP_EXTRA_INDEX_URL=https://gitlab.com/api/v4/projects/65746188/packages/pypi/simple
+ENV UV_EXTRA_INDEX_URL=https://gitlab.com/api/v4/projects/65746188/packages/pypi/simple
+ENV UV_LINK_MODE=copy
+
+RUN --mount=type=cache,target=/root/.cache \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    --mount=type=bind,source=requirements/clean_site_packages.sh,target=clean_site_packages.sh \
+    --mount=type=bind,source=requirements/collections.yml,target=collections.yml \
+    --mount=type=bind,source=requirements/static_files.sh,target=utils/static_files.sh \
+    set -ex \
+    && uv venv \
+    && uv pip install -i${PIP_MIRROR} -r pyproject.toml \
+    && ln -sf $(pwd)/.venv /opt/py3 \
+    && bash utils/static_files.sh \
+    && bash clean_site_packages.sh
+
+ARG VERSION
+
+WORKDIR /opt/jumpserver
+
+ADD . .
+
+RUN echo > /opt/jumpserver/config.yml \
+    && \
+    if [ -n "${VERSION}" ]; then \
+        sed -i "s@VERSION = .*@VERSION = '${VERSION}'@g" apps/jumpserver/const.py; \
+    fi
+
+RUN set -ex \
+    && export SECRET_KEY=$(head -c100 < /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 48) \
+    && . /opt/py3/bin/activate \
+    && cd apps \
+    && python manage.py compilemessages
+
+
+FROM ghcr.io/loong64/python:3.11-slim-trixie
+ENV LANG=en_US.UTF-8 \
+    PATH=/opt/py3/bin:$PATH
+
+ARG DEPENDENCIES="                    \
+        libldap2-dev                  \
+        libx11-dev"
+
+ARG TOOLS="                           \
+        cron                          \
+        ca-certificates               \
+        default-libmysqlclient-dev    \
+        openssh-client                \
+        sshpass                       \
+        nmap                          \
+        bubblewrap"
+
+
+RUN set -ex \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && apt-get update > /dev/null \
+    && apt-get -y install --no-install-recommends ${DEPENDENCIES} \
+    && apt-get -y install --no-install-recommends ${TOOLS} \
+    && mkdir -p /root/.ssh/ \
+    && echo "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile /dev/null\n\tCiphers +aes128-cbc\n\tKexAlgorithms +diffie-hellman-group1-sha1\n\tHostKeyAlgorithms +ssh-rsa" > /root/.ssh/config \
+    && echo "no" | dpkg-reconfigure dash \
+    && apt-get clean all \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "0 3 * * * root find /tmp -type f -mtime +1 -size +1M -exec rm -f {} \; && date > /tmp/clean.log" > /etc/cron.d/cleanup_tmp \
+    && chmod 0644 /etc/cron.d/cleanup_tmp
+
+COPY --from=stage-build /opt /opt
+COPY --from=stage-build /usr/local/bin /usr/local/bin
+COPY --from=stage-build /opt/jumpserver/apps/libs/ansible/ansible.cfg /etc/ansible/
+
+WORKDIR /opt/jumpserver
+
+VOLUME /opt/jumpserver/data
+
+ENTRYPOINT ["./entrypoint.sh"]
+
+EXPOSE 8080
+
+STOPSIGNAL SIGQUIT
+
+CMD ["start", "all"]
