@@ -80,7 +80,7 @@ jobs:
           # Create directory for saved images
           mkdir -p docker-images
 
-        # Pull and save each component for linux/loong64 architecture
+          # Pull and save each component for linux/loong64 architecture
           image_name="ghcr.io/leeeirc/jumpserver:${{ env.image_tag }}"
           
           # Pull image for linux/loong64 architecture
